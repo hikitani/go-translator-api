@@ -9,10 +9,12 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"sync"
 	"syscall"
 
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/hlog"
+	"gopkg.in/natefinch/lumberjack.v2"
 )
 
 var httpPort = flag.Int("port", 8080, "listen port")
@@ -28,21 +30,18 @@ type bodyResp struct {
 func main() {
 	flag.Parse()
 
-	log := zerolog.New(zerolog.NewConsoleWriter()).With().Timestamp().Logger()
-	mainLogFile, err := os.OpenFile("main.log", os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create main.log file")
-	}
-
-	log = log.Output(io.MultiWriter(zerolog.NewConsoleWriter(), mainLogFile))
-
-	logFile, err := os.OpenFile("translator.log", os.O_RDWR|os.O_CREATE, 0666)
-	if err != nil {
-		log.Fatal().Err(err).Msg("Failed to create translator.log file")
-	}
+	log := zerolog.New(io.MultiWriter(zerolog.NewConsoleWriter(), &lumberjack.Logger{
+		Filename: "./main.log",
+		MaxSize:  100,
+		MaxAge:   7,
+	})).With().Timestamp().Logger()
 
 	api := TranslatorAPI{
-		LogOut: logFile,
+		LogOut: &lumberjack.Logger{
+			Filename: "./translator.log",
+			MaxSize:  100,
+			MaxAge:   7,
+		},
 	}
 	if err := api.Init(); err != nil {
 		log.Fatal().Err(err).Msg("Cannot initialize translator api")
@@ -103,25 +102,33 @@ func main() {
 	})))
 
 	server := http.Server{
-		Addr:    ":" + strconv.Itoa(*httpPort),
+		Addr:    "localhost:" + strconv.Itoa(*httpPort),
 		Handler: mux,
 	}
-
-	go func() {
-		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-			log.Fatal().Err(err).Msg("Failed to http listening")
-		}
-	}()
 
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM, syscall.SIGHUP)
 
+	var wg sync.WaitGroup
+
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := server.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			log.Error().Err(err).Msg("Failed to http listening")
+			sig <- syscall.SIGTERM
+		}
+	}()
+
+	log.Info().Int("port", *httpPort).Msg("App started")
 	signal := <-sig
 	log.Info().Stringer("signal", signal).Msg("Got signal!")
 
 	if err := server.Close(); err != nil {
 		log.Error().Err(err).Msg("Server closed bad :(")
 	}
+
+	wg.Wait()
 
 	log.Info().Msg("Bye :)")
 }
