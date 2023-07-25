@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	lru "github.com/hashicorp/golang-lru/v2"
 	"github.com/tebeka/selenium"
 	"github.com/tebeka/selenium/chrome"
 )
@@ -13,13 +14,14 @@ import (
 const (
 	YandexURL   = "https://translate.yandex.ru?source_lang=en&target_lang=ru"
 	InputAreaID = "fakeArea"
+	CacheSize   = 30000
 )
 
 const (
-	defaultChromePath       = "driver/chrome-win64/chrome.exe"
-	defaultChromeDriverPath = "driver/chromedriver.exe"
-	defaultTranslateTimeout = 2 * time.Second
-	defaultPort             = 14560
+	DefaultChromePath       = "driver/chrome-win64/chrome.exe"
+	DefaultChromeDriverPath = "driver/chromedriver.exe"
+	DefaultTranslateTimeout = 2 * time.Second
+	DefaultPort             = 14560
 )
 
 var (
@@ -42,6 +44,7 @@ type TranslatorAPI struct {
 	outputArea selenium.WebElement
 
 	cleanups []func() error
+	cache    *lru.Cache[string, string]
 }
 
 func (t *TranslatorAPI) Init() (err error) {
@@ -56,19 +59,19 @@ func (t *TranslatorAPI) Init() (err error) {
 	}
 
 	if t.TranslateTimeout < 2*time.Second {
-		t.TranslateTimeout = defaultTranslateTimeout
+		t.TranslateTimeout = DefaultTranslateTimeout
 	}
 
 	if t.ChromePath == "" {
-		t.ChromePath = defaultChromePath
+		t.ChromePath = DefaultChromePath
 	}
 
 	if t.ChromeDriverPath == "" {
-		t.ChromeDriverPath = defaultChromeDriverPath
+		t.ChromeDriverPath = DefaultChromeDriverPath
 	}
 
 	if t.Port == 0 {
-		t.Port = defaultPort
+		t.Port = DefaultPort
 	}
 
 	selenium.SetDebug(t.IsDebug)
@@ -126,6 +129,11 @@ func (t *TranslatorAPI) Init() (err error) {
 	}
 	t.outputArea = outputArea
 
+	t.cache, err = lru.New[string, string](CacheSize)
+	if err != nil {
+		return fmt.Errorf("create cache: %w", err)
+	}
+
 	return nil
 }
 
@@ -141,6 +149,10 @@ func (t *TranslatorAPI) Stop() (err error) {
 func (t *TranslatorAPI) Translate(text string) (string, error) {
 	if text == "" {
 		return "", errors.New("got empty text for translating, expected something")
+	}
+
+	if output, ok := t.cache.Get(text); ok {
+		return output, nil
 	}
 
 	prevText, err := t.inputArea.Text()
@@ -195,7 +207,7 @@ func (t *TranslatorAPI) Translate(text string) (string, error) {
 	}, t.TranslateTimeout-elapsed, pollWait)
 	if err != nil {
 		return "", fmt.Errorf("wait translating of text: %w", err)
-		}
+	}
 
 	output, err := t.outputArea.Text()
 	if err != nil {
@@ -203,8 +215,9 @@ func (t *TranslatorAPI) Translate(text string) (string, error) {
 	}
 
 	if output == "" {
-	return "", ErrTranslateNotFound
-}
+		return "", ErrTranslateNotFound
+	}
 
+	t.cache.Add(text, output)
 	return output, nil
 }
