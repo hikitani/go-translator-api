@@ -22,7 +22,10 @@ const (
 	defaultPort             = 14560
 )
 
-var ErrTranslateNotFound = errors.New("translate not found")
+var (
+	ErrTranslateNotFound  = errors.New("translate not found")
+	ErrTranslateTimeouted = errors.New("translate timeouted")
+)
 
 type TranslatorAPI struct {
 	IsDebug          bool
@@ -140,27 +143,68 @@ func (t *TranslatorAPI) Translate(text string) (string, error) {
 		return "", errors.New("got empty text for translating, expected something")
 	}
 
+	prevText, err := t.inputArea.Text()
+	if err != nil {
+		return "", fmt.Errorf("get prev text from input area: %w", err)
+	}
+
+	prevOutput, err := t.outputArea.Text()
+	if err != nil {
+		return "", fmt.Errorf("get prev output from output area: %w", err)
+	}
+
+	if prevText == text {
+		return prevOutput, nil
+	}
+
 	if err := t.inputArea.Clear(); err != nil {
 		return "", fmt.Errorf("clear input are: %w", err)
+	}
+
+	pollWait := 30 * time.Millisecond
+
+	waitBeg := time.Now()
+	err = t.wd.WaitWithTimeoutAndInterval(func(wd selenium.WebDriver) (bool, error) {
+		text, err := t.inputArea.Text()
+		if err != nil {
+			return false, fmt.Errorf("get text from input area: %w", err)
+		}
+
+		return text == "", nil
+	}, t.TranslateTimeout, pollWait)
+	if err != nil {
+		return "", fmt.Errorf("wait clearing input area: %w", err)
+	}
+
+	elapsed := time.Since(waitBeg)
+	if elapsed > t.TranslateTimeout {
+		return "", ErrTranslateTimeouted
 	}
 
 	if err := t.inputArea.SendKeys(text); err != nil {
 		return "", fmt.Errorf("send keys to input area: %w", err)
 	}
 
-	pollWait := 100 * time.Millisecond
-	for i := 0; i < int(t.TranslateTimeout/pollWait); i++ {
-		time.Sleep(pollWait)
-
+	err = t.wd.WaitWithTimeoutAndInterval(func(wd selenium.WebDriver) (bool, error) {
 		output, err := t.outputArea.Text()
 		if err != nil {
-			return "", fmt.Errorf("get text from output area: %w", err)
+			return false, fmt.Errorf("get text from output area: %w", err)
 		}
 
-		if output != "" {
-			return output, nil
+		return output != prevOutput && output != "", nil
+	}, t.TranslateTimeout-elapsed, pollWait)
+	if err != nil {
+		return "", fmt.Errorf("wait translating of text: %w", err)
 		}
+
+	output, err := t.outputArea.Text()
+	if err != nil {
+		return "", fmt.Errorf("get text from output area: %w", err)
 	}
 
+	if output == "" {
 	return "", ErrTranslateNotFound
+}
+
+	return output, nil
 }
