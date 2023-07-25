@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"flag"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -61,8 +62,7 @@ func main() {
 		}
 
 		if r.Method != http.MethodPost {
-			w.WriteHeader(http.StatusMethodNotAllowed)
-			w.Write([]byte(http.StatusText(http.StatusMethodNotAllowed)))
+			http.Error(w, http.StatusText(http.StatusMethodNotAllowed), http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -70,31 +70,30 @@ func main() {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
 			log.Error().Err(err).Msg("Failed to reading request body")
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("Got error when reading request body"))
+			http.Error(w, ErrorJSON("Got error when reading request body"), http.StatusInternalServerError)
 			return
 		}
 
 		if err := json.Unmarshal(body, &req); err != nil {
 			log.Warn().Err(err).Str("body", string(body)).Msg("Decode msg")
-			w.WriteHeader(http.StatusBadRequest)
-			w.Write([]byte("Expected json body with field `text`"))
+			http.Error(w, ErrorJSON("Expected json body with field `text`"), http.StatusBadRequest)
 			return
 		}
 
 		translatedText, err := api.Translate(req.Text)
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("Sorry, I can't translate this :(\nThis is a server error"))
-			log.Error().Err(err).Str("text_to_translate", translatedText).Msg("Cannot translate text")
+			log.Error().Err(err).Str("text_to_translate", req.Text).Msg("Cannot translate text")
+			http.Error(w, ErrorJSON("Sorry, I can't translate this. This is a server error :("), http.StatusInternalServerError)
+			return
 		}
 
 		log.Info().Str("origin_text", req.Text).Str("translated_text", translatedText).Msg("Request translated!")
 
 		b, err := json.Marshal(bodyResp{Translated: translatedText})
 		if err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			w.Write([]byte("Hmm, I can translate this\nBut there was some error"))
+			log.Warn().Err(err).Msg("Encode response")
+			http.Error(w, ErrorJSON("Hmm, I can translate this. But there was some error"), http.StatusInternalServerError)
+			return
 		}
 
 		w.WriteHeader(http.StatusOK)
@@ -131,4 +130,8 @@ func main() {
 	wg.Wait()
 
 	log.Info().Msg("Bye :)")
+}
+
+func ErrorJSON(text string) string {
+	return fmt.Sprintf(`{ "error": "%s" }`, text)
 }
